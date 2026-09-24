@@ -8,6 +8,10 @@
     "pi-extension",
     "logofat"
   ],
+  "scripts": {
+    "test": "node --test 'test/*.test.ts'",
+    "test:smoke": "bash test/smoke-pi.sh"
+  },
   "pi": {
     "extensions": [
       "./src/index.ts"
