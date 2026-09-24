@@ -1,0 +1,22 @@
+{
+  "name": "logofat",
+  "version": "0.1.0",
+  "description": "Logofăt: a Pi extension that adds /route <prompt> to route a prompt to the best installed coding harness.",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "logofat"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}
