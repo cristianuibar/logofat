@@ -4,9 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project state
 
-No source code exists yet. The repo holds only `README.md`, and the design lives in `.planning/`, which GSD manages (`/gsd-*` skills). `.planning/` is gitignored and `commit_docs: false`, so never commit it. Read `.planning/STATE.md` first to see the current phase, then `ROADMAP.md` and the active phase directory under `.planning/phases/`.
+Phase 1 (extension foundation and harness detection) is built: `src/` holds `index.ts` (factory and `/route` handler), `providers.ts` (detection), and `messages.ts` (user-facing copy), and `test/` holds the unit suites and the in-Pi smoke script. `/route` currently reports detected providers only; Jev routing and execution land in later phases. The design lives in `.planning/`, which GSD manages (`/gsd-*` skills). `.planning/` is gitignored and `commit_docs: false`, so never commit it. Read `.planning/STATE.md` first to see the current phase, then `ROADMAP.md` and the active phase directory under `.planning/phases/`.
 
-**Naming:** the project was renamed from **nabu** to **Logofăt** (package/domain spelled `logofat`). The README uses the new name. The planning docs, the directory name, and Phase 1 plans still say `nabu`. Before creating `package.json` or user-facing strings, confirm which name to use.
+**Naming:** the project was renamed from **nabu** to **Logofăt** (package/domain spelled `logofat`). The rename has been applied in code: `package.json` is named `logofat`, and user-facing strings say Logofăt. The planning docs, the directory name, and Phase 1 plans still say `nabu`.
 
 ## What it is
 
@@ -28,8 +28,10 @@ A Pi coding-agent **extension package** (not a fork of Pi) that adds `/route <pr
 - **Output:** always use `ctx.ui.notify`. When `!ctx.hasUI`, also call `pi.sendMessage` with the factory-captured `pi`; `ctx.sendMessage` does not exist. Do not use `ctx.ui.custom`. Guard status rendering for print and JSON modes. The host discards handler return values.
 - **API key hygiene:** read `TYPESAFE_API_KEY`, or a Pi settings value, at call time. Never put the key on a command line or in the transcript, logs, or errors. Strip `Authorization` on error paths.
 
-## Commands (planned; nothing exists yet)
+## Commands
 
+- `npm test` runs the unit suites (`node --test 'test/*.test.ts'`). Don't run bare `node --test`: it also picks up `test/lib/pi-json.mjs`, which is a helper, not a test.
+- `npm run test:smoke` runs `test/smoke-pi.sh`, the 5-check isolated in-Pi smoke test (it needs `pi` on PATH).
 - Tests use `node --test` built-ins, with Node >= 24 for native `.ts` type stripping. There are no devDependencies, so `tsc` is not enforced. `tsconfig.json` is `strict`, `nodenext`, `noEmit`, `allowImportingTsExtensions`, `verbatimModuleSyntax`, and `erasableSyntaxOnly`. Use relative `.ts` imports and only erasable TS syntax: no enums, no namespaces, no parameter properties.
 - Load the extension in Pi in isolation without installing it:
   ```sh
