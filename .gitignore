@@ -11,3 +11,6 @@ Thumbs.db
 # Env
 .env
 .env.local
+
+# GSD planning docs (local-only)
+.planning/
