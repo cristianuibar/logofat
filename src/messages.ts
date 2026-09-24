@@ -12,12 +12,10 @@
 // - claude: `curl -fsSL https://claude.ai/install.sh | bash`, the native
 //   install command from the official Claude Code setup page,
 //   https://code.claude.com/docs/en/setup
-// - muse: no public install page or installer command exists. Following the
-//   UI-SPEC fallback (link the project URL, never invent a command), the
-//   line names the official launcher URL, https://api.meta.ai/muse-launcher.sh.
-//   That URL is the `launcher_url` embedded in the muse launcher itself and
-//   serves the launcher. The "available to Meta employees" wording is the
-//   launcher's own HTTP 403 message.
+// - muse: no public installer command exists. Following the UI-SPEC fallback
+//   (link the project URL, never invent a command), the line points at
+//   https://dev.meta.ai/, the install reference the user supplied at the
+//   01-04 UAT checkpoint.
 //
 // Sanitizing: every interpolated field (id, binary path, version, reason)
 // passes through sanitizeField before rendering. PATH directory names and
@@ -44,8 +42,7 @@ export const NO_HARNESS_HEADING = "**No harnesses detected.**";
 export const NO_HARNESS_INTRO = "Install one of the following, then restart Pi and re-run /route:";
 
 export const INSTALL_LINES: Readonly<Record<ProviderId, string>> = Object.freeze({
-  muse:
-    "no public installer; Muse Code is available to Meta employees through Meta's internal install instructions (launcher: https://api.meta.ai/muse-launcher.sh)",
+  muse: "see https://dev.meta.ai/ for install instructions",
   claude: "curl -fsSL https://claude.ai/install.sh | bash (source: https://code.claude.com/docs/en/setup)",
 });
 

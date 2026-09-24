@@ -49,7 +49,7 @@ const CLAUDE_MISSING: Provider = {
 const GUIDANCE =
   "**No harnesses detected.**\n" +
   "Install one of the following, then restart Pi and re-run /route:\n" +
-  "- muse: no public installer; Muse Code is available to Meta employees through Meta's internal install instructions (launcher: https://api.meta.ai/muse-launcher.sh)\n" +
+  "- muse: see https://dev.meta.ai/ for install instructions\n" +
   "- claude: curl -fsSL https://claude.ai/install.sh | bash (source: https://code.claude.com/docs/en/setup)";
 
 function maxConsecutiveBlankLines(text: string): number {
@@ -152,7 +152,7 @@ test("formatNoHarness: heading, restart wording, both verified install lines", (
   assert.equal(out.split("\n")[0], "**No harnesses detected.**");
   assert.ok(out.includes("then restart Pi and re-run /route"));
   assert.ok(out.includes("https://code.claude.com/docs/en/setup"));
-  assert.ok(out.includes("https://api.meta.ai/muse-launcher.sh"));
+  assert.ok(out.includes("https://dev.meta.ai/"));
   assert.ok(INSTALL_LINES.claude.startsWith("curl -fsSL https://claude.ai/install.sh | bash"));
 });
 
@@ -334,14 +334,14 @@ test("golden: notify plain-text variants strip bold markers and nothing else", (
       "\n" +
       "No harnesses detected.\n" +
       "Install one of the following, then restart Pi and re-run /route:\n" +
-      "- muse: no public installer; Muse Code is available to Meta employees through Meta's internal install instructions (launcher: https://api.meta.ai/muse-launcher.sh)\n" +
+      "- muse: see https://dev.meta.ai/ for install instructions\n" +
       "- claude: curl -fsSL https://claude.ai/install.sh | bash (source: https://code.claude.com/docs/en/setup)",
   );
   assert.equal(
     toPlainText(formatNoHarness()),
     "No harnesses detected.\n" +
       "Install one of the following, then restart Pi and re-run /route:\n" +
-      "- muse: no public installer; Muse Code is available to Meta employees through Meta's internal install instructions (launcher: https://api.meta.ai/muse-launcher.sh)\n" +
+      "- muse: see https://dev.meta.ai/ for install instructions\n" +
       "- claude: curl -fsSL https://claude.ai/install.sh | bash (source: https://code.claude.com/docs/en/setup)",
   );
   // Usage and help carry no markup, so notify shows them unchanged.
@@ -365,8 +365,7 @@ test("golden: every exported copy constant matches the UI-SPEC wording", () => {
   assert.equal(NO_HARNESS_HEADING, "**No harnesses detected.**");
   assert.equal(NO_HARNESS_INTRO, "Install one of the following, then restart Pi and re-run /route:");
   assert.deepEqual({ ...INSTALL_LINES }, {
-    muse:
-      "no public installer; Muse Code is available to Meta employees through Meta's internal install instructions (launcher: https://api.meta.ai/muse-launcher.sh)",
+    muse: "see https://dev.meta.ai/ for install instructions",
     claude: "curl -fsSL https://claude.ai/install.sh | bash (source: https://code.claude.com/docs/en/setup)",
   });
   assert.ok(Object.isFrozen(INSTALL_LINES));
