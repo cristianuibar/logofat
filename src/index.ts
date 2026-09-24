@@ -12,10 +12,11 @@
 // of the session. Empty args and --help never probe.
 //
 // Output contract (test/output-contract.md):
-// - Always call ctx.ui.notify(text, "info") once, with plain text only,
-//   because notify renders `**` literally.
+// - Always call ctx.ui.notify(text, "info") once, with plain text only
+//   (toPlainText from src/messages.ts), because notify renders `**` literally.
 // - Also call the factory-captured pi.sendMessage with customType
-//   CUSTOM_TYPE, but only when !ctx.hasUI (json/print modes). Under TUI or
+//   CUSTOM_TYPE and the markdown copy, but only when !ctx.hasUI (json/print
+//   modes). Under TUI or
 //   RPC the custom message would display twice and enter model context.
 // - The command context has no sendMessage method, and custom UI components
 //   are prohibited. The host discards the handler's return value, so every
@@ -24,29 +25,13 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { detectProviders, PROVIDER_IDS, REASON_VERSION_FAILED } from "./providers.ts";
 import type { Provider } from "./providers.ts";
+import { formatDetectionResult, formatHelp, formatUsage, toPlainText } from "./messages.ts";
 
 /** customType literal named in test/output-contract.md. */
 export const CUSTOM_TYPE = "logofat";
 
 /** Short description shown in Pi's command list. */
 export const ROUTE_DESCRIPTION = "Logofăt: route a prompt to the best installed harness (detection only in v0.1)";
-
-/** `/route --help` copy (UI-SPEC). */
-export const HELP_TEXT =
-  "Usage: /route <prompt>\n" +
-  "Routes a prompt via the best harness (detection only in v0.1; Jev routing lands in Phase 2).";
-
-/** Empty-state copy (UI-SPEC): heading plus body. */
-export const USAGE_HINT =
-  "Usage: /route <prompt>\n" +
-  "Provide a prompt after /route, or run /route --help for usage. Nothing was executed.";
-
-/**
- * Placeholder notice for a non-empty prompt, used until the provider list is
- * rendered. Plan 01-03 task 2 replaces it with src/messages.ts copy.
- */
-export const PLACEHOLDER_NOTICE =
-  "Routing via Jev lands in Phase 2. Logofăt received your prompt, but provider detection is not wired yet, so nothing was executed.";
 
 /** Injectable seams for createRoute. Tests pass fake detectors here. */
 export type RouteDeps = {
@@ -76,15 +61,19 @@ export function allUnavailable(): Provider[] {
  */
 export function renderUsage(args: string): string | null {
   const trimmed = args.trim();
-  if (trimmed === "") return USAGE_HINT;
-  if (trimmed === "--help" || trimmed === "-h") return HELP_TEXT;
+  if (trimmed === "") return formatUsage();
+  if (trimmed === "--help" || trimmed === "-h") return formatHelp();
   return null;
 }
 
-function emit(pi: ExtensionAPI, ctx: ExtensionCommandContext, text: string): void {
-  ctx.ui.notify(text, "info");
+/**
+ * Emits one response. `copy` is markdown. notify gets the plain-text form
+ * because it renders `**` literally; the custom message keeps the markdown.
+ */
+function emit(pi: ExtensionAPI, ctx: ExtensionCommandContext, copy: string): void {
+  ctx.ui.notify(toPlainText(copy), "info");
   if (!ctx.hasUI) {
-    pi.sendMessage({ customType: CUSTOM_TYPE, content: text, display: true });
+    pi.sendMessage({ customType: CUSTOM_TYPE, content: copy, display: true });
   }
 }
 
@@ -130,8 +119,10 @@ export function createRoute(pi: ExtensionAPI, deps: RouteDeps = {}): void {
         emit(pi, ctx, usage);
         return;
       }
-      await getProviders();
-      emit(pi, ctx, PLACEHOLDER_NOTICE);
+      // No loading indicator in v0.1: the first real prompt may wait up to the
+      // probe timeout; later calls answer from the session cache.
+      const providers = await getProviders();
+      emit(pi, ctx, formatDetectionResult(providers));
     },
   });
 }
