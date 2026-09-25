@@ -25,17 +25,32 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { detectProviders, PROVIDER_IDS, REASON_VERSION_FAILED } from "./providers.ts";
 import type { Provider } from "./providers.ts";
-import { formatDetectionResult, formatHelp, formatUsage, toPlainText } from "./messages.ts";
+import { requestDecision, resolveApiKey } from "./jev.ts";
+import type { JevResult } from "./jev.ts";
+import {
+  EXECUTION_NOTICE,
+  LOADING_LINE,
+  formatDecisionLine,
+  formatDetectionResult,
+  formatHelp,
+  formatJevError,
+  formatMissingKey,
+  formatUsage,
+  toPlainText,
+} from "./messages.ts";
 
 /** customType literal named in test/output-contract.md. */
 export const CUSTOM_TYPE = "logofat";
 
 /** Short description shown in Pi's command list. */
-export const ROUTE_DESCRIPTION = "Logofăt: route a prompt to the best installed harness (detection only in v0.1)";
+export const ROUTE_DESCRIPTION =
+  "Logofăt: route a prompt to the best installed harness (decision only; execution lands in a later release)";
 
-/** Injectable seams for createRoute. Tests pass fake detectors here. */
+/** Injectable seams for createRoute. Tests pass fakes here; production uses the real modules. */
 export type RouteDeps = {
   detect?: typeof detectProviders;
+  resolveKey?: typeof resolveApiKey;
+  requestDecision?: typeof requestDecision;
 };
 
 /**
@@ -86,6 +101,8 @@ function emit(pi: ExtensionAPI, ctx: ExtensionCommandContext, copy: string): voi
  */
 export function createRoute(pi: ExtensionAPI, deps: RouteDeps = {}): void {
   const detect = deps.detect ?? detectProviders;
+  const resolveKey = deps.resolveKey ?? resolveApiKey;
+  const decide = deps.requestDecision ?? requestDecision;
   const state: { cached: Provider[] | null; inflight: Promise<Provider[]> | null } = {
     cached: null,
     inflight: null,
@@ -119,10 +136,39 @@ export function createRoute(pi: ExtensionAPI, deps: RouteDeps = {}): void {
         emit(pi, ctx, usage);
         return;
       }
-      // No loading indicator in v0.1: the first real prompt may wait up to the
-      // probe timeout; later calls answer from the session cache.
       const providers = await getProviders();
-      emit(pi, ctx, formatDetectionResult(providers));
+      const list = formatDetectionResult(providers);
+      const availableProviders = providers.filter(
+        (p) => p !== null && typeof p === "object" && p.available === true,
+      );
+      // Zero available: Phase 1 guidance, with no key resolution and no Jev
+      // call (an empty Choice set is never sent).
+      if (availableProviders.length === 0) {
+        emit(pi, ctx, list);
+        return;
+      }
+      // The Jev path. Handler never throws: an unexpected rejection (only
+      // possible from a hostile injected fake — the real modules never throw)
+      // maps to the network block rather than the stderr error signature.
+      let result: JevResult;
+      try {
+        const key = await resolveKey();
+        if (key === null) {
+          emit(pi, ctx, `${list}\n\n${formatMissingKey()}`);
+          return;
+        }
+        // Notify-only pre-emit: replaced by the final emit in TUI/RPC and
+        // invisible in --print --mode json (never sendMessage).
+        ctx.ui.notify(toPlainText(LOADING_LINE), "info");
+        result = await decide(args, availableProviders, key);
+      } catch {
+        result = { ok: false, failure: { class: "network" } };
+      }
+      if (result.ok) {
+        emit(pi, ctx, `${list}\n\n${formatDecisionLine(result.decision.harness)}\n\n${EXECUTION_NOTICE}`);
+      } else {
+        emit(pi, ctx, `${list}\n\n${formatJevError(result.failure.class)}`);
+      }
     },
   });
 }

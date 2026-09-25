@@ -4,10 +4,11 @@
 # Loads src/index.ts into the real `pi` binary in isolation and proves the
 # Phase 1 success criteria end to end, plus the committed unit suite:
 #
-#   (1) env-report     real PATH: populated list with the routing notice, OR
+#   (1) env-report     real PATH: populated list with missing-key guidance, OR
 #                      the no-harness guidance on a zero-harness machine
 #   (2) golden         generated fixture PATH with fake muse/claude: the full
-#                      expected provider list, character for character
+#                      expected list plus missing-key guidance, character for
+#                      character
 #   (3) usage          bare /route: usage copy, no probe
 #   (4) no-harness     fixture PATH with no harnesses: guidance, exit 0
 #   (5) unit-suite     node --test 'test/*.test.ts' under the TAP wrapper
@@ -24,7 +25,8 @@
 #
 # Automated checks only. The interactive TUI UAT is a separate human gate.
 # Needs no model or API key: slash-command dispatch in print mode is
-# credential-free.
+# credential-free, and run_pi strips TYPESAFE_API_KEY so the populated
+# branches take the missing-key path (which makes no network calls).
 
 set -uo pipefail
 
@@ -123,10 +125,13 @@ make_fixture() {
 }
 
 # run_pi <name> <PATH value> <prompt>: output lands in $WORK/<name>/.
+# Strips TYPESAFE_API_KEY (02-PLAN.md 02-04/T6): the agent dir is already a
+# fresh empty temp dir per call, so no key is resolvable and the populated
+# branches deterministically take the missing-key path (no network).
 run_pi() {
   local dir="$WORK/$1" path_value=$2 prompt=$3
   mkdir -p "$dir/agent" "$dir/sess"
-  timeout 60 env PATH="$path_value" PI_CODING_AGENT_DIR="$dir/agent" \
+  timeout 60 env -u TYPESAFE_API_KEY PATH="$path_value" PI_CODING_AGENT_DIR="$dir/agent" \
     "$PI_REAL" --no-session --session-dir "$dir/sess" --no-extensions --no-skills \
     --no-context-files --no-themes --extension "$REPO/src/index.ts" \
     --print --mode json "$prompt" >"$dir/out.json" 2>"$dir/err.txt" </dev/null
@@ -152,13 +157,14 @@ check_env() {
     fail $n "$label" "pi exited $rc" "$dir"
     return
   fi
-  local notice guidance heading
-  notice=$(marker ROUTING_NOTICE) || { fail $n "$label" "could not derive ROUTING_NOTICE"; return; }
+  local missing_key guidance heading
+  missing_key=$(marker formatMissingKey) || { fail $n "$label" "could not derive formatMissingKey"; return; }
   guidance=$(marker formatNoHarness) || { fail $n "$label" "could not derive formatNoHarness"; return; }
   heading=$(grep -oE "$HEADING_RE" "$dir/out.json" | head -1)
 
-  if assert_pi "$dir" "$notice" && [ -n "$heading" ]; then
-    pass $n "$label: populated branch" "heading: $heading" "notice: $notice" "$VERDICT"
+  if assert_pi "$dir" "$missing_key" && [ -n "$heading" ]; then
+    pass $n "$label: populated branch" "heading: $heading" \
+      "missing-key: $(printf '%s' "$missing_key" | head -1)" "$VERDICT"
     return
   fi
   local populated_verdict=$VERDICT
@@ -186,7 +192,7 @@ check_golden() {
       process.stdout.write(m.formatProviderList([
         { id: "muse", binary: process.env.MUSE_BIN, version: "Muse Code 7.7.7 (smoke)", available: true },
         { id: "claude", binary: process.env.CLAUDE_BIN, version: "2.1.999 (Claude Code)", available: true },
-      ]));
+      ]) + "\n\n" + m.formatMissingKey());
     ') || { fail $n "$label" "could not derive the expected list"; return; }
 
   run_pi golden "$fix:/usr/bin:/bin" "/route smoke golden"

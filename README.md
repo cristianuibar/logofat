@@ -31,3 +31,22 @@ The project was first called nabu. That name was already used by other software,
 ## Status
 
 Not shipped. v0.1 proves the assignment: detect the local harnesses, ask Jev, run the one it picks, and show progress in Pi. v1 is the full workflow and the harness.
+
+## Jev API key
+
+`/route` asks Jev (TypeSafe System One) which harness should take the prompt. Jev needs a TypeSafe API key. Provide it one of two ways:
+
+- `TYPESAFE_API_KEY` environment variable (restart Pi after setting it), or
+- `logofat.typesafeApiKey` in Pi's agent `settings.json` (no restart needed):
+
+```json
+{ "logofat": { "typesafeApiKey": "YOUR_KEY" } }
+```
+
+The environment variable wins when both are set. The key is read fresh on every `/route` call and travels only as the `Authorization` header of the Jev request — it never appears in the transcript, logs, or error output.
+
+## What /route sends to Jev
+
+Each `/route <prompt>` call sends your prompt verbatim plus the available harnesses as `{id, version}` pairs. It never sends binary paths, file contents, or environment variables.
+
+Note: because the prompt goes to Jev verbatim, anything pasted into it — including secrets — is sent along. Keep credentials out of the prompt.

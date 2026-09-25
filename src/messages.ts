@@ -25,16 +25,25 @@
 
 import { PROVIDER_IDS, REASON_VERSION_FAILED } from "./providers.ts";
 import type { Provider, ProviderId } from "./providers.ts";
+import type { JevFailureClass } from "./jev.ts";
 
-/** Shown 1 blank line after the provider rows, only when at least one harness is available. */
-export const ROUTING_NOTICE = "Automatic routing isn't available yet — this list is the detection result only.";
+/** Shown after the decision line on the Jev success path (Phase 2: decision only, execution later). */
+export const EXECUTION_NOTICE =
+  "The prompt was not executed — running it on the chosen harness lands in a later release.";
+
+/** Notify-only pre-emit on the Jev path. Never sent via sendMessage. */
+export const LOADING_LINE = "Asking Jev to choose a harness…";
+
+export const MISSING_KEY_HEADING = "**Jev API key missing.**";
+
+export const MISSING_KEY_INTRO =
+  "/route needs a TypeSafe API key to choose a harness. Provide it one of these ways, then re-run /route:";
 
 export const USAGE_HEADING = "Usage: /route <prompt>";
 
 export const USAGE_BODY = "Provide a prompt after /route, or run /route --help for usage. Nothing was executed.";
 
-export const HELP_BODY =
-  "Routes a prompt via the best harness (detection only for now; automatic routing lands in a later release).";
+export const HELP_BODY = "Shows the Jev-chosen harness for a prompt (execution lands in a later release).";
 
 export const NO_HARNESS_HEADING = "**No harnesses detected.**";
 
@@ -103,15 +112,14 @@ export function countAvailable(providers: readonly Provider[]): number {
 
 /**
  * Heading plus one row per known harness in the stable [muse, claude] order,
- * always, even at (0/2). The routing notice follows after 1 blank line only
- * when at least one harness is available.
+ * always, even at (0/2). Bare list only: the handler appends the decision or
+ * guidance block after 1 blank line.
  */
 export function formatProviderList(providers: readonly Provider[]): string {
   const available = countAvailable(providers);
   const heading = `**Detected providers (${available}/${PROVIDER_IDS.length}):**`;
   const rows = PROVIDER_IDS.map((id) => formatRow(id, findRecord(providers, id)));
-  const list = [heading, ...rows].join("\n");
-  return available >= 1 ? `${list}\n\n${ROUTING_NOTICE}` : list;
+  return [heading, ...rows].join("\n");
 }
 
 /** The no-harness guidance block (D-06). The handler appends it after the (0/2) rows. */
@@ -130,6 +138,75 @@ export function formatNoHarness(): string {
 export function formatDetectionResult(providers: readonly Provider[]): string {
   const list = formatProviderList(providers);
   return countAvailable(providers) === 0 ? `${list}\n\n${formatNoHarness()}` : list;
+}
+
+/** Missing-key guidance: heading + intro + 2 setup lines. Key values never appear here. */
+export function formatMissingKey(): string {
+  return [
+    MISSING_KEY_HEADING,
+    MISSING_KEY_INTRO,
+    "- TYPESAFE_API_KEY environment variable (restart Pi after setting it)",
+    `- logofat.typesafeApiKey in Pi settings.json, e.g. { "logofat": { "typesafeApiKey": "YOUR_KEY" } }`,
+  ].join("\n");
+}
+
+/**
+ * Success decision line. The id passed allowlist validation already; it is
+ * still routed through sanitizeField for defense in depth (validated ids
+ * render verbatim).
+ */
+export function formatDecisionLine(harness: ProviderId): string {
+  return `Jev routed this prompt to **${sanitizeField(harness)}**.`;
+}
+
+/** Per-class Jev error blocks: heading + what-happened + next step. */
+const JEV_ERROR_BLOCKS: Readonly<Record<JevFailureClass, readonly [string, string, string]>> = Object.freeze({
+  timeout: Object.freeze([
+    "**Jev timed out.**",
+    "The routing request timed out after repeated attempts.",
+    "Check your network connection and re-run /route.",
+  ]),
+  network: Object.freeze([
+    "**Jev is unreachable.**",
+    "Could not reach Jev after repeated attempts.",
+    "Check your network connection and re-run /route.",
+  ]),
+  "rate-limited": Object.freeze([
+    "**Jev rate limit exceeded.**",
+    "Jev rate-limited the routing request after repeated attempts.",
+    "Wait a minute and re-run /route.",
+  ]),
+  "server-error": Object.freeze([
+    "**Jev had an internal error.**",
+    "Jev returned server errors after repeated attempts.",
+    "Wait a minute and re-run /route.",
+  ]),
+  auth: Object.freeze([
+    "**Jev rejected the API key.**",
+    "Jev refused the request (invalid API key).",
+    "Check TYPESAFE_API_KEY or logofat.typesafeApiKey in Pi settings.json, then re-run /route.",
+  ]),
+  "bad-request": Object.freeze([
+    "**Jev rejected the request.**",
+    "Jev refused the routing request (client error).",
+    "Re-run /route; if it persists, please report this as a Logofăt bug.",
+  ]),
+  "bad-response": Object.freeze([
+    "**Jev gave an unusable answer.**",
+    "Jev's response was missing the harness choice or was malformed.",
+    "Re-run /route; if it persists, please report this as a Logofăt bug.",
+  ]),
+  "unknown-harness": Object.freeze([
+    "**Jev chose an unavailable harness.**",
+    "Jev's choice was not one of the detected harnesses, so /route did not use it.",
+    "Re-run /route to ask Jev again.",
+  ]),
+});
+
+/** Renders one per-class Jev error block. Unknown classes fall back to bad-request (never throws). */
+export function formatJevError(failureClass: JevFailureClass): string {
+  const block = JEV_ERROR_BLOCKS[failureClass] ?? JEV_ERROR_BLOCKS["bad-request"];
+  return block.join("\n");
 }
 
 /** Empty `/route`: usage heading plus body. Nothing is executed or probed. */

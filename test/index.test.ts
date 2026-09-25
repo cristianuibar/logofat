@@ -1,5 +1,6 @@
 // Unit tests for src/index.ts: factory purity, argument handling, the emit
-// gate, and the factory-closure detection cache (plan 01-04, task 1).
+// gate, the factory-closure detection cache (plan 01-04, task 1), and the
+// Jev/key handler paths with injected fakes (plan 02-04, task 3).
 //
 // Test doubles follow the real host contract (test/output-contract.md):
 // - the stub `pi` records registerCommand / on / sendMessage calls;
@@ -25,16 +26,21 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import logofat, { CUSTOM_TYPE, ROUTE_DESCRIPTION, allUnavailable, createRoute, renderUsage } from "../src/index.ts";
 import {
-  ROUTING_NOTICE,
+  EXECUTION_NOTICE,
+  LOADING_LINE,
+  formatDecisionLine,
   formatDetectionResult,
   formatHelp,
+  formatJevError,
+  formatMissingKey,
   formatNoHarness,
   formatProviderList,
   formatUsage,
   toPlainText,
 } from "../src/messages.ts";
 import { REASON_NOT_FOUND, REASON_VERSION_FAILED } from "../src/providers.ts";
-import type { Provider } from "../src/providers.ts";
+import type { Provider, ProviderId } from "../src/providers.ts";
+import type { JevFailureClass, JevResult } from "../src/jev.ts";
 
 type Handler = (args: string, ctx: ExtensionCommandContext) => Promise<void>;
 type Registration = { name: string; description: string; handler: Handler };
@@ -128,6 +134,78 @@ function throwIfCalled(): Promise<Provider[]> {
   throw new Error("detection must not run for usage-level input");
 }
 
+// --- Jev/key fakes (plan 02-04, task 3). Fakes return JevResult values
+// directly; no fake reimplements parsing. ---
+
+type KeyFake = { fake: () => Promise<string | null>; calls: () => number };
+type DecideFake = {
+  fake: (prompt: string, available: readonly Provider[], key: string) => Promise<JevResult>;
+  calls: () => number;
+};
+
+function keyFake(impl: () => Promise<string | null>): KeyFake {
+  let n = 0;
+  return {
+    fake: () => {
+      n += 1;
+      return impl();
+    },
+    calls: () => n,
+  };
+}
+
+function decideFake(impl: () => Promise<JevResult>): DecideFake {
+  let n = 0;
+  return {
+    fake: () => {
+      n += 1;
+      return impl();
+    },
+    calls: () => n,
+  };
+}
+
+function nullKey(): KeyFake {
+  return keyFake(() => Promise.resolve(null));
+}
+
+function stubKey(key = "STUB-KEY"): KeyFake {
+  return keyFake(() => Promise.resolve(key));
+}
+
+function okDecision(harness: ProviderId): DecideFake {
+  return decideFake(() =>
+    Promise.resolve({ ok: true, decision: { harness, confidence: 0.9, probabilities: { [harness]: 1 } } }),
+  );
+}
+
+function failDecision(cls: JevFailureClass): DecideFake {
+  return decideFake(() => Promise.resolve({ ok: false, failure: { class: cls } }));
+}
+
+function throwKey(): KeyFake {
+  return keyFake(() => {
+    throw new Error("key resolution must not run on this path");
+  });
+}
+
+function throwJev(): DecideFake {
+  return decideFake(() => {
+    throw new Error("Jev must not run on this path");
+  });
+}
+
+const FAILURE_CLASSES: readonly JevFailureClass[] = [
+  "timeout",
+  "network",
+  "rate-limited",
+  "server-error",
+  "auth",
+  "bad-request",
+  "bad-response",
+  "unknown-harness",
+];
+
 // ---------------------------------------------------------------------------
 // Factory purity and registration
 
@@ -213,34 +291,57 @@ test("gate: hasUI true (TUI/RPC) -> one notify, zero pi.sendMessage (usage)", as
   assert.equal(pi.sent.length, 0);
 });
 
-test("gate: hasUI true (TUI/RPC) -> one notify, zero pi.sendMessage (detection result)", async () => {
+test("gate: hasUI true (TUI/RPC) -> one notify, zero pi.sendMessage (missing-key path)", async () => {
   const pi = makePi();
-  createRoute(pi.api, { detect: () => Promise.resolve([MUSE_OK, CLAUDE_OK]) });
+  const key = nullKey();
+  const jev = throwJev();
+  createRoute(pi.api, {
+    detect: () => Promise.resolve([MUSE_OK, CLAUDE_OK]),
+    resolveKey: key.fake,
+    requestDecision: jev.fake,
+  });
   const { ctx, notes } = makeCtx(true);
   await run(routeHandler(pi), "hello", ctx);
-  assert.deepEqual(notes, [{ text: toPlainText(formatProviderList([MUSE_OK, CLAUDE_OK])), level: "info" }]);
+  const copy = `${formatProviderList([MUSE_OK, CLAUDE_OK])}\n\n${formatMissingKey()}`;
+  assert.deepEqual(notes, [{ text: toPlainText(copy), level: "info" }]);
   assert.ok(!notes[0].text.includes("**"), "notify text is plain (no bold markers)");
   assert.equal(pi.sent.length, 0);
+  assert.equal(key.calls(), 1);
+  assert.equal(jev.calls(), 0);
 });
 
 test("gate: hasUI false (json) -> one notify plus one pi.sendMessage with the markdown copy", async () => {
   const pi = makePi();
-  createRoute(pi.api, { detect: () => Promise.resolve([MUSE_OK, CLAUDE_MISSING]) });
+  const key = nullKey();
+  const jev = throwJev();
+  createRoute(pi.api, {
+    detect: () => Promise.resolve([MUSE_OK, CLAUDE_MISSING]),
+    resolveKey: key.fake,
+    requestDecision: jev.fake,
+  });
   const { ctx, notes } = makeCtx(false);
   await run(routeHandler(pi), "hello", ctx);
-  const copy = formatProviderList([MUSE_OK, CLAUDE_MISSING]);
+  const copy = `${formatProviderList([MUSE_OK, CLAUDE_MISSING])}\n\n${formatMissingKey()}`;
   assert.deepEqual(notes, [{ text: toPlainText(copy), level: "info" }]);
   assert.deepEqual(pi.sent, [{ customType: "logofat", content: copy, display: true }]);
-  assert.ok(copy.includes(ROUTING_NOTICE));
+  assert.equal(key.calls(), 1);
+  assert.equal(jev.calls(), 0);
 });
 
 test("the prompt text is passed through unsplit and never echoed into the payload", async () => {
   const pi = makePi();
-  createRoute(pi.api, { detect: () => Promise.resolve([MUSE_OK, CLAUDE_OK]) });
+  const key = nullKey();
+  const jev = throwJev();
+  createRoute(pi.api, {
+    detect: () => Promise.resolve([MUSE_OK, CLAUDE_OK]),
+    resolveKey: key.fake,
+    requestDecision: jev.fake,
+  });
   const { ctx } = makeCtx(false);
   await run(routeHandler(pi), " secret  prompt   text ", ctx);
   assert.equal(pi.sent.length, 1);
   assert.ok(!pi.sent[0].content.includes("secret"));
+  assert.equal(jev.calls(), 0);
 });
 
 // ---------------------------------------------------------------------------
@@ -261,7 +362,6 @@ test("composed N=0 payload: (0/2) rows + exactly 1 blank line + full guidance, n
   assert.equal(pi.sent.length, 1);
   assert.equal(pi.sent[0].content, expected);
   assert.equal(pi.sent[0].content, formatDetectionResult([MUSE_MISSING, CLAUDE_MISSING]));
-  assert.ok(!pi.sent[0].content.includes(ROUTING_NOTICE));
   assert.ok(!pi.sent[0].content.includes("\n\n\n"), "at most 1 consecutive blank line");
   assert.deepEqual(notes, [{ text: toPlainText(expected), level: "info" }]);
 });
@@ -330,7 +430,9 @@ test("cache: two concurrent /route calls share one in-flight detection", async (
     release = resolve;
   });
   const det = counting(() => pending);
-  createRoute(pi.api, { detect: det.detect });
+  const key = nullKey();
+  const jev = throwJev();
+  createRoute(pi.api, { detect: det.detect, resolveKey: key.fake, requestDecision: jev.fake });
   const handler = routeHandler(pi);
 
   const a = makeCtx(false);
@@ -345,13 +447,14 @@ test("cache: two concurrent /route calls share one in-flight detection", async (
   release([MUSE_OK, CLAUDE_OK]);
   await Promise.all([runA, runB]);
   assert.equal(det.calls(), 1);
-  const copy = formatProviderList([MUSE_OK, CLAUDE_OK]);
+  const copy = `${formatProviderList([MUSE_OK, CLAUDE_OK])}\n\n${formatMissingKey()}`;
   assert.deepEqual(
     pi.sent.map((m) => m.content),
     [copy, copy],
   );
   assert.equal(a.notes.length, 1);
   assert.equal(b.notes.length, 1);
+  assert.equal(jev.calls(), 0);
 });
 
 test("cache: sequential calls reuse the session result (one detection total)", async () => {
@@ -362,7 +465,9 @@ test("cache: sequential calls reuse the session result (one detection total)", a
     // A second probe would return a different answer; the cache must hide it.
     return Promise.resolve(n === 1 ? [MUSE_OK, CLAUDE_OK] : [MUSE_MISSING, CLAUDE_MISSING]);
   });
-  createRoute(pi.api, { detect: det.detect });
+  const key = nullKey();
+  const jev = throwJev();
+  createRoute(pi.api, { detect: det.detect, resolveKey: key.fake, requestDecision: jev.fake });
   const handler = routeHandler(pi);
   for (const prompt of ["one", "two", "three"]) {
     const { ctx } = makeCtx(false);
@@ -370,32 +475,231 @@ test("cache: sequential calls reuse the session result (one detection total)", a
   }
   assert.equal(det.calls(), 1);
   assert.equal(pi.sent.length, 3);
-  for (const m of pi.sent) assert.equal(m.content, formatProviderList([MUSE_OK, CLAUDE_OK]));
+  const copy = `${formatProviderList([MUSE_OK, CLAUDE_OK])}\n\n${formatMissingKey()}`;
+  for (const m of pi.sent) assert.equal(m.content, copy);
+  assert.equal(key.calls(), 3, "the key resolves fresh on every call (never cached)");
+  assert.equal(jev.calls(), 0);
 });
 
 test("cache: usage/help between prompts never probe and never disturb the cache", async () => {
   const pi = makePi();
   const det = counting(() => Promise.resolve([MUSE_OK, CLAUDE_MISSING]));
-  createRoute(pi.api, { detect: det.detect });
+  const key = nullKey();
+  const jev = throwJev();
+  createRoute(pi.api, { detect: det.detect, resolveKey: key.fake, requestDecision: jev.fake });
   const handler = routeHandler(pi);
   await run(handler, "", makeCtx(false).ctx);
   await run(handler, "--help", makeCtx(false).ctx);
   assert.equal(det.calls(), 0);
+  assert.equal(key.calls(), 0, "usage-level input never resolves a key");
   await run(handler, "hello", makeCtx(false).ctx);
   await run(handler, "-h", makeCtx(false).ctx);
   await run(handler, "hello again", makeCtx(false).ctx);
   assert.equal(det.calls(), 1);
+  assert.equal(jev.calls(), 0);
 });
 
 test("cache: each factory call owns its own cache (no module-level state)", async () => {
   const det = counting(() => Promise.resolve([MUSE_OK, CLAUDE_OK]));
+  const key = nullKey();
+  const jev = throwJev();
   const pi1 = makePi();
   const pi2 = makePi();
-  createRoute(pi1.api, { detect: det.detect });
-  createRoute(pi2.api, { detect: det.detect });
+  createRoute(pi1.api, { detect: det.detect, resolveKey: key.fake, requestDecision: jev.fake });
+  createRoute(pi2.api, { detect: det.detect, resolveKey: key.fake, requestDecision: jev.fake });
   await run(routeHandler(pi1), "hello", makeCtx(false).ctx);
   await run(routeHandler(pi2), "hello", makeCtx(false).ctx);
   assert.equal(det.calls(), 2);
+  assert.equal(jev.calls(), 0);
+});
+
+// ---------------------------------------------------------------------------
+// Jev/key handler paths (plan 02-04, task 3)
+
+test("jev: missing key emits list + missing-key guidance, Jev never runs (json shape)", async () => {
+  const pi = makePi();
+  const key = nullKey();
+  const jev = throwJev();
+  createRoute(pi.api, {
+    detect: () => Promise.resolve([MUSE_OK, CLAUDE_OK]),
+    resolveKey: key.fake,
+    requestDecision: jev.fake,
+  });
+  const { ctx, notes } = makeCtx(false);
+  await run(routeHandler(pi), "hello", ctx);
+  const expected = `${formatProviderList([MUSE_OK, CLAUDE_OK])}\n\n${formatMissingKey()}`;
+  assert.deepEqual(notes, [{ text: toPlainText(expected), level: "info" }]);
+  assert.deepEqual(pi.sent, [{ customType: "logofat", content: expected, display: true }]);
+  assert.equal(key.calls(), 1);
+  assert.equal(jev.calls(), 0);
+});
+
+for (const id of ["muse", "claude"] as const) {
+  test(`jev: stubbed Jev choice ${id} surfaces **${id}** (per-Jev routing, not a default)`, async () => {
+    const pi = makePi();
+    const key = stubKey();
+    const jev = okDecision(id);
+    createRoute(pi.api, {
+      detect: () => Promise.resolve([MUSE_OK, CLAUDE_OK]),
+      resolveKey: key.fake,
+      requestDecision: jev.fake,
+    });
+    const { ctx, notes } = makeCtx(false);
+    await run(routeHandler(pi), "hello", ctx);
+    const list = formatProviderList([MUSE_OK, CLAUDE_OK]);
+    const expected = `${list}\n\n${formatDecisionLine(id)}\n\n${EXECUTION_NOTICE}`;
+    assert.equal(pi.sent.length, 1);
+    assert.equal(pi.sent[0].content, expected);
+    assert.ok(pi.sent[0].content.includes(`**${id}**`));
+    // Regression tripwire: the retired Phase 1 notice must never render beside
+    // the decision line (literal pasted once, on purpose).
+    assert.ok(
+      !pi.sent[0].content.includes(
+        "Automatic routing isn't available yet — this list is the detection result only.",
+      ),
+    );
+    assert.deepEqual(
+      notes.map((n) => n.text),
+      [toPlainText(LOADING_LINE), toPlainText(expected)],
+    );
+    assert.equal(key.calls(), 1);
+    assert.equal(jev.calls(), 1);
+  });
+}
+
+for (const cls of FAILURE_CLASSES) {
+  test(`jev: stubbed ${cls} emits list + the ${cls} block`, async () => {
+    const pi = makePi();
+    const key = stubKey();
+    const jev = failDecision(cls);
+    createRoute(pi.api, {
+      detect: () => Promise.resolve([MUSE_OK, CLAUDE_OK]),
+      resolveKey: key.fake,
+      requestDecision: jev.fake,
+    });
+    const { ctx, notes } = makeCtx(false);
+    await run(routeHandler(pi), "hello", ctx);
+    const expected = `${formatProviderList([MUSE_OK, CLAUDE_OK])}\n\n${formatJevError(cls)}`;
+    assert.deepEqual(pi.sent, [{ customType: "logofat", content: expected, display: true }]);
+    assert.deepEqual(
+      notes.map((n) => n.text),
+      [toPlainText(LOADING_LINE), toPlainText(expected)],
+    );
+    assert.equal(jev.calls(), 1);
+  });
+}
+
+test("jev: hasUI true success emits loading pre-emit + final notify, zero sendMessage", async () => {
+  const pi = makePi();
+  createRoute(pi.api, {
+    detect: () => Promise.resolve([MUSE_OK, CLAUDE_OK]),
+    resolveKey: stubKey().fake,
+    requestDecision: okDecision("muse").fake,
+  });
+  const { ctx, notes } = makeCtx(true);
+  await run(routeHandler(pi), "hello", ctx);
+  const expected =
+    `${formatProviderList([MUSE_OK, CLAUDE_OK])}\n\n${formatDecisionLine("muse")}\n\n${EXECUTION_NOTICE}`;
+  assert.deepEqual(
+    notes,
+    [
+      { text: toPlainText(LOADING_LINE), level: "info" },
+      { text: toPlainText(expected), level: "info" },
+    ],
+  );
+  assert.equal(pi.sent.length, 0);
+});
+
+test("jev: zero-harness path never resolves a key or calls Jev", async () => {
+  const pi = makePi();
+  const key = throwKey();
+  const jev = throwJev();
+  createRoute(pi.api, {
+    detect: () => Promise.resolve([MUSE_MISSING, CLAUDE_MISSING]),
+    resolveKey: key.fake,
+    requestDecision: jev.fake,
+  });
+  const { ctx, notes } = makeCtx(false);
+  await run(routeHandler(pi), "hello", ctx);
+  const expected = formatDetectionResult([MUSE_MISSING, CLAUDE_MISSING]);
+  assert.deepEqual(pi.sent, [{ customType: "logofat", content: expected, display: true }]);
+  assert.equal(notes.length, 1);
+  assert.equal(key.calls(), 0);
+  assert.equal(jev.calls(), 0);
+});
+
+for (const args of ["", "--help", "-h"]) {
+  test(`jev: usage-level input ${JSON.stringify(args)} never resolves a key or calls Jev`, async () => {
+    const pi = makePi();
+    const key = throwKey();
+    const jev = throwJev();
+    createRoute(pi.api, { detect: throwIfCalled, resolveKey: key.fake, requestDecision: jev.fake });
+    const { ctx, notes } = makeCtx(false);
+    await run(routeHandler(pi), args, ctx);
+    assert.equal(pi.sent.length, 1);
+    assert.equal(notes.length, 1);
+    assert.equal(key.calls(), 0);
+    assert.equal(jev.calls(), 0);
+  });
+}
+
+test("jev: hostile requestDecision rejection maps to the network block, handler resolves", async () => {
+  const pi = makePi();
+  const key = stubKey();
+  const hostile = decideFake(() => Promise.reject(new Error("hostile fake boom")));
+  createRoute(pi.api, {
+    detect: () => Promise.resolve([MUSE_OK, CLAUDE_OK]),
+    resolveKey: key.fake,
+    requestDecision: hostile.fake,
+  });
+  const { ctx, notes } = makeCtx(false);
+  await run(routeHandler(pi), "hello", ctx);
+  const expected = `${formatProviderList([MUSE_OK, CLAUDE_OK])}\n\n${formatJevError("network")}`;
+  assert.deepEqual(pi.sent, [{ customType: "logofat", content: expected, display: true }]);
+  assert.ok(!pi.sent[0].content.includes("hostile fake boom"), "the raw error never reaches the transcript");
+  assert.equal(notes.length, 2, "pre-emit fired before the hostile rejection");
+  assert.equal(hostile.calls(), 1);
+});
+
+test("jev: key resolution runs fresh on every Jev call (two calls, count is 2)", async () => {
+  const pi = makePi();
+  const key = nullKey();
+  const jev = throwJev();
+  createRoute(pi.api, {
+    detect: () => Promise.resolve([MUSE_OK, CLAUDE_OK]),
+    resolveKey: key.fake,
+    requestDecision: jev.fake,
+  });
+  const handler = routeHandler(pi);
+  await run(handler, "one", makeCtx(false).ctx);
+  await run(handler, "two", makeCtx(false).ctx);
+  assert.equal(key.calls(), 2, "no caching: one resolution per Jev-path invocation");
+  assert.equal(pi.sent.length, 2);
+});
+
+// Fixed canary shared with test/jev.test.ts T4: looks key-like but is NOT a
+// real key — never provision this value anywhere.
+const HANDLER_CANARY = "TSK-CANARY-7f3e2a9c1d4e";
+
+test("jev: handler surfaces never contain the resolved key (success + 8 failure paths)", async () => {
+  const paths: Array<{ label: string; decide: DecideFake }> = [
+    { label: "success", decide: okDecision("muse") },
+    ...FAILURE_CLASSES.map((cls) => ({ label: cls, decide: failDecision(cls) })),
+  ];
+  assert.equal(paths.length, 9);
+  for (const { label, decide } of paths) {
+    const pi = makePi();
+    createRoute(pi.api, {
+      detect: () => Promise.resolve([MUSE_OK, CLAUDE_OK]),
+      resolveKey: stubKey(HANDLER_CANARY).fake,
+      requestDecision: decide.fake,
+    });
+    const { ctx, notes } = makeCtx(false);
+    await run(routeHandler(pi), "hello", ctx);
+    for (const n of notes) assert.ok(!n.text.includes(HANDLER_CANARY), `${label} notify leaks the key`);
+    assert.equal(pi.sent.length, 1);
+    assert.ok(!pi.sent[0].content.includes(HANDLER_CANARY), `${label} sent leaks the key`);
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -451,8 +755,22 @@ test("import purity: import and factory spawn nothing; the handler does (positiv
   }
   assert.ok(!existsSync(marker));
 
+  // Hermetic key boundary (02-04/T5): the Phase 2 handler path reaches key
+  // resolution, so the child must not see ambient credentials — delete
+  // TYPESAFE_API_KEY and point PI_CODING_AGENT_DIR at a fresh empty temp dir
+  // (no settings.json), keeping the fixture PATH. No network is possible (no
+  // key resolvable by construction); this doubles as the hermetic missing-key
+  // regression test.
+  const agentDir = mkdtempSync(path.join(FIXTURE_ROOT, "agent-"));
+  const childEnv = { ...process.env };
+  delete childEnv.TYPESAFE_API_KEY;
+  childEnv["PI_CODING_AGENT_DIR"] = agentDir;
+  childEnv["PATH"] = binDir;
+  childEnv["LOGOFAT_MARKER"] = marker;
+  childEnv["LOGOFAT_INDEX_URL"] = INDEX_URL;
+
   const child = spawnSync(process.execPath, ["--input-type=module", "-e", CHILD_SCRIPT], {
-    env: { ...process.env, PATH: binDir, LOGOFAT_MARKER: marker, LOGOFAT_INDEX_URL: INDEX_URL },
+    env: childEnv,
     encoding: "utf8",
     timeout: 30_000,
   });
@@ -475,5 +793,8 @@ test("import purity: import and factory spawn nothing; the handler does (positiv
   assert.equal(out.sent.length, 1);
   assert.ok(out.sent[0].startsWith("**Detected providers (2/2):**\n"), out.sent[0]);
   assert.ok(out.sent[0].includes(`- muse: available (${path.join(binDir, "muse")}, muse 9.9.9)`), out.sent[0]);
+  // Missing-key path with the pinned env: the guidance block (parent-computed
+  // from src/messages.ts), exactly 1 sent + 1 notify (no pre-emit here).
+  assert.ok(out.sent[0].includes(formatMissingKey()), out.sent[0]);
   assert.equal(out.notes.length, 1);
 });
