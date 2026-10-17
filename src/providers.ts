@@ -157,6 +157,95 @@ async function detectOne(id: ProviderId, env: NodeJS.ProcessEnv, timeoutMs: numb
   return record;
 }
 
+export type ProviderChange =
+  | { id: ProviderId; kind: 'became-available' | 'became-unavailable' }
+  | { id: ProviderId; kind: 'version' | 'binary'; previous: string | null; current: string | null };
+
+type SnapshotReading = { available: boolean; version: string | null; binary: string };
+
+/**
+ * One id's reading from a snapshot. Missing records, foreign entries, and
+ * unusable fields degrade to all-unavailable semantics (binary falls back
+ * to the id, mirroring the real not-found record shape). Never throws.
+ */
+function readSnapshotRecord(
+  list: readonly Provider[] | null | undefined,
+  id: ProviderId,
+): SnapshotReading {
+  const missing: SnapshotReading = { available: false, version: null, binary: id };
+  try {
+    if (!Array.isArray(list)) return missing;
+    for (const entry of list) {
+      let recordId: unknown;
+      try {
+        recordId = (entry as Provider | null | undefined)?.id;
+      } catch {
+        continue;
+      }
+      if (recordId !== id) continue;
+      const fields = entry as unknown as Record<string, unknown>;
+      let available = false;
+      let version: string | null = null;
+      let binary: string = id;
+      try {
+        available = fields['available'] === true;
+      } catch {
+        available = false;
+      }
+      try {
+        const raw = fields['version'];
+        version = typeof raw === 'string' ? raw : null;
+      } catch {
+        version = null;
+      }
+      try {
+        const raw = fields['binary'];
+        binary = typeof raw === 'string' ? raw : id;
+      } catch {
+        binary = id;
+      }
+      return { available, version, binary };
+    }
+    return missing;
+  } catch {
+    return missing;
+  }
+}
+
+/**
+ * Pure diff of two detection snapshots (Phase 6, ROUTE-03). Compares per
+ * harness over the stable id order; each harness emits at most an
+ * availability flip (which subsumes the version/binary deltas it implies)
+ * or, when availability is unchanged, version then binary rows. Availability
+ * changes carry no payload — the formatter reads binary/version/reason from
+ * the fresh snapshot. Never throws.
+ */
+export function diffProviders(
+  old: readonly Provider[],
+  next: readonly Provider[],
+): ProviderChange[] {
+  try {
+    const changes: ProviderChange[] = [];
+    for (const id of PROVIDER_IDS) {
+      const was = readSnapshotRecord(old, id);
+      const is = readSnapshotRecord(next, id);
+      if (was.available !== is.available) {
+        changes.push(is.available ? { id, kind: 'became-available' } : { id, kind: 'became-unavailable' });
+        continue;
+      }
+      if (was.version !== is.version) {
+        changes.push({ id, kind: 'version', previous: was.version, current: is.version });
+      }
+      if (was.binary !== is.binary) {
+        changes.push({ id, kind: 'binary', previous: was.binary, current: is.binary });
+      }
+    }
+    return changes;
+  } catch {
+    return [];
+  }
+}
+
 /**
  * Detect the supported harnesses. Probes run concurrently; the result is
  * always `[muse, claude]` in that order, whatever order the probes finish in.

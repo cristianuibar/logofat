@@ -13,6 +13,8 @@ import { homedir } from "node:os";
 import path from "node:path";
 
 import type { Provider, ProviderId } from "./providers.ts";
+import { effortFromScore, renderCriteria } from "./capabilities.ts";
+import type { EffortLevel } from "./capabilities.ts";
 
 /** Jev System One endpoint (pinned, no configurability in v0.1). */
 export const JEV_ENDPOINT = "https://api.typesafe.ai/v1/systemone";
@@ -23,6 +25,9 @@ export const JEV_MODEL = "jev-latest";
 /** Caller-chosen question id. The id is not sent to the model; answers return under it. */
 export const JEV_QUESTION_ID = "harness";
 
+/** Caller-chosen Score question id (Phase 3: difficulty). Same id semantics as the Choice id. */
+export const JEV_SCORE_ID = "difficulty";
+
 /** Per-attempt request timeout in ms (02-PLAN.md D-17). */
 export const JEV_TIMEOUT_MS = 15_000;
 
@@ -32,26 +37,48 @@ export const JEV_MAX_ATTEMPTS = 3;
 /** Backoff base in ms: sleep `base * 2^(n-1)` before attempts 2..N (02-PLAN.md D-17). */
 export const JEV_BACKOFF_BASE_MS = 500;
 
-// Request instructions (code constant, never surfaced). Backticks are literal:
+// Request instructions (code constants, never surfaced). Backticks are literal:
 // they reference `state` fields per the TypeSafe skill.
 const INSTRUCTIONS =
   "Which of the available harnesses in `providers` should execute the coding task in `prompt`?";
 
-/** POST body for the Jev System One call. Exact shape per 02-PLAN.md 02-01/T1. */
+const SCORE_INSTRUCTIONS = "How difficult is the coding task described in `prompt`?";
+
+// Score levels, low end first (03-PLAN.md §2 literals). Frozen; the level
+// strings are immutable and safe to share by reference, but every built
+// question gets a FRESH criteria array (see buildScoreQuestion).
+//
+// The valid Score range is derived from this array's length inside
+// parseDecision, never a literal: if the level count ever changes, the range
+// follows. The Score-to-effort cut points and the boundary tests move with it.
+const SCORE_LEVELS: readonly string[] = Object.freeze([
+  "Routine: a single small change with a clear location and verifiable outcome, such as a typo fix, a rename, or a one-function edit.",
+  "Standard: a multi-step task in one area, such as a small feature or a bug fix needing diagnosis, touching a few files with testable behavior.",
+  "Complex: open-ended or cross-cutting work, such as an architecture change, unfamiliar-codebase exploration, ambiguous requirements, or high-blast-radius edits.",
+]);
+
+/** Choice question: criteria maps each available id to its capability prose. */
+export type ChoiceQuestion = {
+  type: "choice";
+  instructions: string;
+  criteria: Record<string, string>;
+};
+
+/** Score question: criteria is an ordered array of level descriptions, low end first. */
+export type ScoreQuestion = {
+  type: "score";
+  instructions: string;
+  criteria: string[];
+};
+
+/** POST body for the Jev System One call. Exact shape per 02-PLAN.md 02-01/T1, widened in Phase 3 to the Choice/Score union. */
 export type JevRequest = {
   state: {
     prompt: string;
     providers: Array<{ id: ProviderId; version: string | null }>;
   };
   model: string;
-  questions: Record<
-    string,
-    {
-      type: "choice";
-      instructions: string;
-      criteria: Record<string, null>;
-    }
-  >;
+  questions: Record<string, ChoiceQuestion | ScoreQuestion>;
 };
 
 /** Failure classes for the Jev call. One distinct block per class (D-18). */
@@ -69,31 +96,63 @@ export type JevFailureClass =
 export type JevFailure = { class: JevFailureClass };
 
 /**
- * A validated Jev decision. `confidence`/`probabilities` ride opaquely
- * (Phase 4 owns gating); malformed values arrive as null, never as a failure.
+ * A validated Jev decision. `confidence`/`probabilities` and
+ * `scoreConfidence`/`scoreProbabilities` ride opaquely (Phase 4 owns
+ * gating); malformed values arrive as null, never as a failure.
+ * `difficulty` is the raw Score, kept for Phase 4 logging and Phase 5 use.
+ * `effort` is the effort level selected from the Score (no default: a
+ * missing Score fails the whole decision before selection runs).
  */
 export type JevDecision = {
   harness: ProviderId;
   confidence: number | null;
   probabilities: Readonly<Record<string, number>> | null;
+  difficulty: number;
+  scoreConfidence: number | null;
+  scoreProbabilities: Readonly<Record<string, number>> | null;
+  effort: EffortLevel;
 };
 
 /** The result of a Jev call: a decision or a typed failure. Never a throw. */
 export type JevResult = { ok: true; decision: JevDecision } | { ok: false; failure: JevFailure };
 
 /**
+ * Builds the Choice question for the available ids. Pure: returns a fresh
+ * object per call (fresh criteria map from renderCriteria; instruction and
+ * prose strings are immutable and shared by reference).
+ */
+export function buildChoiceQuestion(availableIds: readonly ProviderId[]): ChoiceQuestion {
+  return {
+    type: "choice",
+    instructions: INSTRUCTIONS,
+    criteria: renderCriteria(availableIds),
+  };
+}
+
+/**
+ * Builds the difficulty Score question. Pure: returns a fresh object per
+ * call (fresh criteria array copied from the frozen levels).
+ */
+export function buildScoreQuestion(): ScoreQuestion {
+  return {
+    type: "score",
+    instructions: SCORE_INSTRUCTIONS,
+    criteria: [...SCORE_LEVELS],
+  };
+}
+
+/**
  * Builds the Jev request body. Pure: no I/O, no env, never throws for
  * well-formed input.
  *
- * Rules: prompt verbatim (no trim/truncate); criteria keys = available ids
- * only, all null (Phase 3 owns grounding); `version` key always present
- * (null when unknown); no `binary`/path/env fields anywhere. An empty
- * `available` array still builds — the handler never calls it that way
- * (D-19), so there is no guard here and no throw.
+ * Rules: prompt verbatim (no trim/truncate); Choice criteria keys =
+ * available ids only with grounded capability prose (renderCriteria);
+ * `version` key always present (null when unknown); no `binary`/path/env
+ * fields anywhere. An empty `available` array still builds — the handler
+ * never calls it that way (D-19), so there is no guard here and no throw.
+ * Each call returns fresh question objects (no shared mutable definitions).
  */
 export function buildRequest(prompt: string, available: readonly Provider[]): JevRequest {
-  const criteria: Record<string, null> = {};
-  for (const p of available) criteria[p.id] = null;
   return {
     state: {
       prompt,
@@ -101,11 +160,8 @@ export function buildRequest(prompt: string, available: readonly Provider[]): Je
     },
     model: JEV_MODEL,
     questions: {
-      [JEV_QUESTION_ID]: {
-        type: "choice",
-        instructions: INSTRUCTIONS,
-        criteria,
-      },
+      [JEV_QUESTION_ID]: buildChoiceQuestion(available.map((p) => p.id)),
+      [JEV_SCORE_ID]: buildScoreQuestion(),
     },
   };
 }
@@ -115,14 +171,19 @@ export function buildRequest(prompt: string, available: readonly Provider[]): Je
  * never throws for any input — throwing getters yield `bad-response`, never
  * propagate.
  *
- * Rules (02-RESEARCH §5): `body.answers["harness"]` must be an object with
- * `type === "choice"` and a non-empty string `choice`, else `bad-response`.
- * A choice outside `availableIds` is `unknown-harness` (never coerce, never
- * default; the unknown value appears nowhere in the result). Extra answer
- * keys are ignored (Phase 3 Score forward-compat). `confidence` carries when
- * a finite number, else null; `probabilities` carries when a plain object of
- * all-finite-numbers (copied), else null — no range clamping, and a valid
- * choice never fails over confidence shape.
+ * Rules (02-RESEARCH §5, extended in Phase 3): `body.answers["harness"]`
+ * must be an object with `type === "choice"` and a non-empty string
+ * `choice`, else `bad-response`. A choice outside `availableIds` is
+ * `unknown-harness` (never coerce, never default; the unknown value appears
+ * nowhere in the result). `body.answers["difficulty"]` must be an object
+ * with `type === "score"` and a finite-number `score` within
+ * `[0, SCORE_LEVELS.length - 1]`, else `bad-response` (never coerce, never
+ * a default effort). The harness checks run first: a body failing both
+ * reports the harness class. Extra answer keys are ignored, and `legend` is
+ * ignored. `confidence`/`probabilities` on either answer carry when a
+ * finite number / plain object of all-finite-numbers (copied), else null —
+ * no range clamping, no key checks, and a valid answer never fails over
+ * confidence shape.
  */
 export function parseDecision(body: unknown, availableIds: readonly ProviderId[]): JevResult {
   const bad = (): JevResult => ({ ok: false, failure: { class: "bad-response" } });
@@ -155,8 +216,29 @@ export function parseDecision(body: unknown, availableIds: readonly ProviderId[]
     if (typeof choice !== "string" || choice.length === 0) return bad();
     const allowed: readonly unknown[] = Array.isArray(availableIds) ? availableIds : [];
     if (!allowed.includes(choice)) return { ok: false, failure: { class: "unknown-harness" } };
+    // Difficulty Score: object + type + finite in-range number, else the
+    // whole decision fails loudly (no default effort anywhere).
+    let diffAnswer: unknown;
+    try {
+      diffAnswer = (answers as Record<string, unknown>)[JEV_SCORE_ID];
+    } catch {
+      return bad();
+    }
+    if (typeof diffAnswer !== "object" || diffAnswer === null || Array.isArray(diffAnswer)) return bad();
+    const diffRec = diffAnswer as Record<string, unknown>;
+    let diffType: unknown;
+    let score: unknown;
+    try {
+      diffType = diffRec["type"];
+      score = diffRec["score"];
+    } catch {
+      return bad();
+    }
+    if (diffType !== "score") return bad();
+    if (typeof score !== "number" || !Number.isFinite(score)) return bad();
+    if (score < 0 || score > SCORE_LEVELS.length - 1) return bad();
     // Opaque carry-through: malformed confidence shape degrades to null and
-    // never fails the valid choice (Phase 4 owns confidence UX).
+    // never fails the valid answers (Phase 4 owns confidence UX).
     let confidence: number | null = null;
     try {
       const c: unknown = rec["confidence"];
@@ -182,7 +264,43 @@ export function parseDecision(body: unknown, availableIds: readonly ProviderId[]
     } catch {
       probabilities = null;
     }
-    return { ok: true, decision: { harness: choice as ProviderId, confidence, probabilities } };
+    let scoreConfidence: number | null = null;
+    try {
+      const c: unknown = diffRec["confidence"];
+      if (typeof c === "number" && Number.isFinite(c)) scoreConfidence = c;
+    } catch {
+      scoreConfidence = null;
+    }
+    let scoreProbabilities: Record<string, number> | null = null;
+    try {
+      const p: unknown = diffRec["probabilities"];
+      if (typeof p === "object" && p !== null && !Array.isArray(p)) {
+        const carried: Record<string, number> = {};
+        let allFinite = true;
+        for (const [k, v] of Object.entries(p)) {
+          if (typeof v !== "number" || !Number.isFinite(v)) {
+            allFinite = false;
+            break;
+          }
+          carried[k] = v;
+        }
+        if (allFinite) scoreProbabilities = carried;
+      }
+    } catch {
+      scoreProbabilities = null;
+    }
+    return {
+      ok: true,
+      decision: {
+        harness: choice as ProviderId,
+        confidence,
+        probabilities,
+        difficulty: score,
+        scoreConfidence,
+        scoreProbabilities,
+        effort: effortFromScore(score),
+      },
+    };
   } catch {
     return bad();
   }
@@ -190,6 +308,7 @@ export function parseDecision(body: unknown, availableIds: readonly ProviderId[]
 
 /** Injectable seams for requestDecision (the DetectOptions precedent). */
 export type RequestDecisionOptions = {
+  signal?: AbortSignal;
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
   maxAttempts?: number;
@@ -207,8 +326,17 @@ function isRetriable(failure: JevFailureClass): boolean {
   );
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    const done = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    signal?.addEventListener("abort", done, { once: true });
+    if (signal?.aborted) done();
+  });
 }
 
 function transportFailure(err: unknown, aborted: boolean): JevResult {
@@ -226,9 +354,15 @@ function transportFailure(err: unknown, aborted: boolean): JevResult {
 /**
  * Maps one settled fetch to a JevResult. 2xx bodies go through parseDecision
  * (invalid JSON → bad-response); error statuses map per the 02-02/T2 table.
- * Error bodies are never read or echoed. Never throws.
+ * A body read aborted by the attempt timeout is a `timeout` (retriable), not
+ * a bug-report case — headers-arrived/body-stalled is a timeout. Error
+ * bodies are never read or echoed. Never throws.
  */
-async function handleResponse(res: unknown, available: readonly Provider[]): Promise<JevResult> {
+async function handleResponse(
+  res: unknown,
+  available: readonly Provider[],
+  signal?: AbortSignal,
+): Promise<JevResult> {
   try {
     if (typeof res !== "object" || res === null) return { ok: false, failure: { class: "bad-response" } };
     const rec = res as { ok?: unknown; status?: unknown; json?: unknown };
@@ -238,6 +372,7 @@ async function handleResponse(res: unknown, available: readonly Provider[]): Pro
       try {
         json = await (rec.json as () => Promise<unknown>)();
       } catch {
+        if (signal?.aborted === true) return { ok: false, failure: { class: "timeout" } };
         return { ok: false, failure: { class: "bad-response" } };
       }
       return parseDecision(json, available.map((p) => p.id));
@@ -264,14 +399,22 @@ function attemptOnce(
   key: string,
   fetchImpl: typeof fetch,
   timeoutMs: number,
+  signal?: AbortSignal,
 ): Promise<JevResult> {
   const controller = new AbortController();
   return new Promise<JevResult>((resolve) => {
     const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const abort = () => controller.abort();
     const settle = (result: JevResult): void => {
       clearTimeout(timer);
+      signal?.removeEventListener("abort", abort);
+      controller.signal.removeEventListener("abort", onAbort);
       resolve(result);
     };
+    const onAbort = () => settle({ ok: false, failure: { class: "timeout" } });
+    controller.signal.addEventListener("abort", onAbort, { once: true });
+    signal?.addEventListener("abort", abort, { once: true });
+    if (signal?.aborted) { abort(); return; }
     let sent: unknown;
     try {
       sent = fetchImpl(JEV_ENDPOINT, {
@@ -286,7 +429,7 @@ function attemptOnce(
     }
     Promise.resolve(sent).then(
       (res) => {
-        handleResponse(res, available).then(settle, () =>
+        handleResponse(res, available, controller.signal).then(settle, () =>
           settle({ ok: false, failure: { class: "bad-response" } }),
         );
       },
@@ -316,11 +459,12 @@ export async function requestDecision(
     const fetchImpl = opts.fetchImpl ?? globalThis.fetch;
     let last: JevResult = { ok: false, failure: { class: "network" } };
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-      const result = await attemptOnce(prompt, available, key, fetchImpl, timeoutMs);
+      if (opts.signal?.aborted) return last;
+      const result = await attemptOnce(prompt, available, key, fetchImpl, timeoutMs, opts.signal);
       if (result.ok) return result;
       last = result;
-      if (!isRetriable(result.failure.class) || attempt >= maxAttempts) return result;
-      await sleep(backoffBaseMs * 2 ** (attempt - 1));
+      if (opts.signal?.aborted || !isRetriable(result.failure.class) || attempt >= maxAttempts) return result;
+      await sleep(backoffBaseMs * 2 ** (attempt - 1), opts.signal);
     }
     return last;
   } catch {

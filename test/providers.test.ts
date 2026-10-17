@@ -16,11 +16,13 @@ import path from 'node:path';
 
 import {
   detectProviders,
+  diffProviders,
   firstVersionLine,
   REASON_NOT_FOUND,
   REASON_VERSION_FAILED,
   REASON_VERSION_TIMED_OUT,
 } from '../src/providers.ts';
+import type { Provider } from '../src/providers.ts';
 
 const ROOT = mkdtempSync(path.join(os.tmpdir(), 'logofat-providers-'));
 after(() => {
@@ -254,4 +256,121 @@ test('firstVersionLine: first non-empty cleaned line, null for blank or control-
   assert.equal(firstVersionLine(''), null);
   assert.equal(firstVersionLine(undefined), null);
   assert.equal(firstVersionLine('weird-format-no-digits'), 'weird-format-no-digits');
+});
+
+// ---------------------------------------------------------------------------
+// Plan 06-03/T1: diffProviders unit goldens.
+// ---------------------------------------------------------------------------
+
+const DIFF_MUSE_OK: Provider = { id: 'muse', binary: '/fx/muse', version: 'Muse Code 1.3.0', available: true };
+const DIFF_CLAUDE_OK: Provider = { id: 'claude', binary: '/fx/claude', version: '2.1.281 (Claude Code)', available: true };
+const DIFF_MUSE_MISSING: Provider = { id: 'muse', binary: 'muse', version: null, available: false, reason: REASON_NOT_FOUND };
+const DIFF_CLAUDE_MISSING: Provider = {
+  id: 'claude',
+  binary: 'claude',
+  version: null,
+  available: false,
+  reason: REASON_NOT_FOUND,
+};
+
+test('06-03/T1: availability flips emit exactly one payload-free change per harness', () => {
+  assert.deepEqual(diffProviders([DIFF_MUSE_MISSING, DIFF_CLAUDE_MISSING], [DIFF_MUSE_OK, DIFF_CLAUDE_MISSING]), [
+    { id: 'muse', kind: 'became-available' },
+  ]);
+  assert.deepEqual(diffProviders([DIFF_MUSE_OK, DIFF_CLAUDE_OK], [DIFF_MUSE_MISSING, DIFF_CLAUDE_OK]), [
+    { id: 'muse', kind: 'became-unavailable' },
+  ]);
+  // A flip subsumes the version/binary deltas it implies — even when every field moved.
+  assert.deepEqual(diffProviders([DIFF_MUSE_MISSING, DIFF_CLAUDE_MISSING], [DIFF_MUSE_OK, DIFF_CLAUDE_OK]), [
+    { id: 'muse', kind: 'became-available' },
+    { id: 'claude', kind: 'became-available' },
+  ]);
+  // Recovery with an unchanged binary and null version emits ONLY the flip.
+  const broken: Provider = { id: 'muse', binary: '/fx/muse', version: null, available: false, reason: REASON_VERSION_FAILED };
+  const healed: Provider = { id: 'muse', binary: '/fx/muse', version: null, available: true };
+  assert.deepEqual(diffProviders([broken, DIFF_CLAUDE_MISSING], [healed, DIFF_CLAUDE_MISSING]), [
+    { id: 'muse', kind: 'became-available' },
+  ]);
+});
+
+test('06-03/T1: version and binary rows carry old vs new, null-safe', () => {
+  const v1: Provider = { ...DIFF_MUSE_OK, version: '1.0' };
+  const v2: Provider = { ...DIFF_MUSE_OK, version: '2.0' };
+  assert.deepEqual(diffProviders([v1, DIFF_CLAUDE_OK], [v2, DIFF_CLAUDE_OK]), [
+    { id: 'muse', kind: 'version', previous: '1.0', current: '2.0' },
+  ]);
+  const vNull: Provider = { ...DIFF_MUSE_OK, version: null };
+  assert.deepEqual(diffProviders([v1, DIFF_CLAUDE_OK], [vNull, DIFF_CLAUDE_OK]), [
+    { id: 'muse', kind: 'version', previous: '1.0', current: null },
+  ]);
+  assert.deepEqual(diffProviders([vNull, DIFF_CLAUDE_OK], [v1, DIFF_CLAUDE_OK]), [
+    { id: 'muse', kind: 'version', previous: null, current: '1.0' },
+  ]);
+  const b1: Provider = { ...DIFF_MUSE_OK, binary: '/a/muse' };
+  const b2: Provider = { ...DIFF_MUSE_OK, binary: '/b/muse' };
+  assert.deepEqual(diffProviders([b1, DIFF_CLAUDE_OK], [b2, DIFF_CLAUDE_OK]), [
+    { id: 'muse', kind: 'binary', previous: '/a/muse', current: '/b/muse' },
+  ]);
+});
+
+test('06-03/T1: stable harness order, kind order availability then version then binary', () => {
+  const museMoved: Provider = { ...DIFF_MUSE_OK, binary: '/b/muse', version: '2.0' };
+  const changes = diffProviders([DIFF_MUSE_OK, DIFF_CLAUDE_MISSING], [museMoved, DIFF_CLAUDE_OK]);
+  assert.deepEqual(changes, [
+    { id: 'muse', kind: 'version', previous: 'Muse Code 1.3.0', current: '2.0' },
+    { id: 'muse', kind: 'binary', previous: '/fx/muse', current: '/b/muse' },
+    { id: 'claude', kind: 'became-available' },
+  ]);
+  // claude-only changes still emit in harness order after a quiet muse.
+  assert.deepEqual(diffProviders([DIFF_MUSE_OK, DIFF_CLAUDE_OK], [DIFF_MUSE_OK, DIFF_CLAUDE_MISSING]), [
+    { id: 'claude', kind: 'became-unavailable' },
+  ]);
+});
+
+test('06-03/T1: identical snapshots diff to nothing', () => {
+  assert.deepEqual(diffProviders([DIFF_MUSE_OK, DIFF_CLAUDE_OK], [DIFF_MUSE_OK, DIFF_CLAUDE_OK]), []);
+  assert.deepEqual(
+    diffProviders([DIFF_MUSE_MISSING, DIFF_CLAUDE_MISSING], [DIFF_MUSE_MISSING, DIFF_CLAUDE_MISSING]),
+    [],
+  );
+  // Record order and foreign entries do not matter: comparison keys by id.
+  const foreign = { id: 'cursor', binary: '/fx/cursor', version: '9.9', available: true };
+  assert.deepEqual(
+    diffProviders([DIFF_CLAUDE_OK, DIFF_MUSE_OK, foreign] as Provider[], [DIFF_MUSE_OK, DIFF_CLAUDE_OK]),
+    [],
+  );
+});
+
+test('06-03/T1: hostile inputs degrade to all-unavailable semantics, never throw', () => {
+  const cases: Array<[unknown, unknown]> = [
+    [null, null],
+    [undefined, undefined],
+    ['nope', 42],
+    [[null], [undefined]],
+    [[{ id: 'cursor', available: true }], [{ id: 'cursor', available: false }]],
+    [[{ id: 'muse' }], []],
+    [[], [{ id: 'muse' }]],
+    [[{ id: 'muse', available: true, version: 42, binary: 42 }], [DIFF_MUSE_OK]],
+  ];
+  for (const [old, next] of cases) {
+    let changes;
+    try {
+      changes = diffProviders(old as Provider[], next as Provider[]);
+    } catch (err) {
+      assert.fail(`diffProviders threw: ${String(err)}`);
+    }
+    assert.ok(Array.isArray(changes));
+  }
+  // Both sides missing the known ids: nothing to report.
+  assert.deepEqual(diffProviders(null as unknown as Provider[], []), []);
+  // A bare { id } record reads as unavailable, like a missing record.
+  assert.deepEqual(diffProviders([{ id: 'muse' } as Provider], []), []);
+  // Throwing getters degrade per-record instead of nuking the diff.
+  const evil = {};
+  Object.defineProperty(evil, 'id', {
+    get() {
+      throw new Error('id boom');
+    },
+  });
+  assert.deepEqual(diffProviders([evil as Provider, DIFF_MUSE_OK], [DIFF_MUSE_OK, DIFF_CLAUDE_MISSING]), []);
 });

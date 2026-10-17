@@ -12,6 +12,10 @@
 #   (3) usage          bare /route: usage copy, no probe
 #   (4) no-harness     fixture PATH with no harnesses: guidance, exit 0
 #   (5) unit-suite     node --test 'test/*.test.ts' under the TAP wrapper
+#   (6) refresh-list   fixture PATH with fake muse/claude: the full list plus
+#                      the first-detection note (a cross-invocation diff is
+#                      unreachable — every --print call is a fresh session)
+#   (7) refresh-usage  /route-providers --bogus: usage copy, no probe
 #
 # Every Pi call uses the isolation set from test/output-contract.md
 # (temp PI_CODING_AGENT_DIR and session dir, --no-session, --no-extensions,
@@ -21,7 +25,7 @@
 #
 # Output: one `PASS (n) ...` or `FAIL (n) ...` line per check, evidence on
 # indented lines below it, then a SUMMARY line. Exits non-zero if any check
-# fails or if any of the five checks did not run.
+# fails or if any of the seven checks did not run.
 #
 # Automated checks only. The interactive TUI UAT is a separate human gate.
 # Needs no model or API key: slash-command dispatch in print mode is
@@ -290,14 +294,76 @@ check_units() {
   fi
 }
 
+# --- (6) refresh list + first-detection note ----------------------------------
+
+check_refresh_list() {
+  local n=6 label="refresh-list (fixture muse + claude)" fix="$WORK/fix-refresh/bin" dir="$WORK/refresh"
+  make_fixture "$fix"
+  printf '#!/bin/sh\necho "Muse Code 7.7.7 (smoke)"\n' >"$fix/muse"
+  printf '#!/bin/sh\necho "2.1.999 (Claude Code)"\n' >"$fix/claude"
+  chmod +x "$fix/muse" "$fix/claude"
+
+  local expected
+  expected=$(LOGOFAT_MESSAGES_URL="$MESSAGES_URL" MUSE_BIN="$fix/muse" CLAUDE_BIN="$fix/claude" \
+    node --input-type=module -e '
+      const m = await import(process.env.LOGOFAT_MESSAGES_URL);
+      process.stdout.write(m.formatProviderList([
+        { id: "muse", binary: process.env.MUSE_BIN, version: "Muse Code 7.7.7 (smoke)", available: true },
+        { id: "claude", binary: process.env.CLAUDE_BIN, version: "2.1.999 (Claude Code)", available: true },
+      ]) + "\n\n" + m.formatFirstDetectionNote());
+    ') || { fail $n "$label" "could not derive the expected list"; return; }
+
+  run_pi refresh "$fix:/usr/bin:/bin" "/route-providers"
+  local rc
+  rc=$(cat "$dir/rc")
+  if [ "$rc" != "0" ]; then
+    fail $n "$label" "pi exited $rc" "$dir"
+    return
+  fi
+  if assert_pi "$dir" "$expected"; then
+    pass $n "$label: full list + first-detection note matched" "$(printf '%s' "$expected" | head -1)" \
+      "$(printf '%s' "$expected" | tail -1)" "$VERDICT"
+  else
+    fail $n "$label" "$VERDICT; expected content:" "$dir"
+    printf '%s\n' "$expected" | sed 's/^/    > /'
+  fi
+}
+
+# --- (7) refresh usage: usage copy, no probe ----------------------------------
+
+check_refresh_usage() {
+  local n=7 label="refresh-usage (/route-providers --bogus)" dir="$WORK/refreshusage"
+  local usage
+  usage=$(marker formatRefreshUsage) || { fail $n "$label" "could not derive formatRefreshUsage"; return; }
+  run_pi refreshusage "$PATH" "/route-providers --bogus"
+  local rc
+  rc=$(cat "$dir/rc")
+  if [ "$rc" != "0" ]; then
+    fail $n "$label" "pi exited $rc" "$dir"
+    return
+  fi
+  if ! assert_pi "$dir" "$usage"; then
+    fail $n "$label" "$VERDICT" "$dir"
+    return
+  fi
+  # pi-json cannot assert absence: the missing heading proves no probe rendered.
+  if grep -qE "$HEADING_RE" "$dir/out.json"; then
+    fail $n "$label" "provider heading present — usage must not probe" "$dir"
+    return
+  fi
+  pass $n "$label" "$(printf '%s' "$usage" | head -1)" "$VERDICT"
+}
+
 check_env
 check_golden
 check_usage
 check_no_harness
 check_units
+check_refresh_list
+check_refresh_usage
 
-if [ "$(echo $RAN)" != "1 2 3 4 5" ]; then
-  echo "FAIL (set) expected checks 1 2 3 4 5 to run, ran:${RAN:- none}"
+if [ "$(echo $RAN)" != "1 2 3 4 5 6 7" ]; then
+  echo "FAIL (set) expected checks 1 2 3 4 5 6 7 to run, ran:${RAN:- none}"
   FAILURES=$((FAILURES + 1))
 fi
 
@@ -305,5 +371,5 @@ if [ "$FAILURES" -ne 0 ]; then
   echo "SUMMARY: $FAILURES failure(s)"
   exit 1
 fi
-echo "SUMMARY: 5/5 checks passed"
+echo "SUMMARY: 7/7 checks passed"
 exit 0
